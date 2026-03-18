@@ -1,276 +1,223 @@
-# Argo CD + Argo Rollouts Canary Deployment**
+# **Canary Rollout (v1 → v2)**
 
-## **Lab Objectives**
+### **rollout-canary.yaml**
 
-By the end of this lab you will:
-
-*   Install **Argo CD**
-*   Install **Argo Rollouts**
-*   Deploy a **sample app** using Rollouts
-*   Configure **Canary strategy**
-*   Use **Argo Rollouts Dashboard/Kubectl plugin** to promote/abort canary
-
-***
-
-# **Prerequisites**
-
-*   Kubernetes cluster (Kind / Minikube recommended)
-*   `kubectl` installed
-*   `argocd` CLI (optional but useful)
-
-***
-
-#  **Create a Kubernetes Cluster (Kind Example)**
-
-```bash
-kind create cluster --name argolab
-```
-
-***
-
-#  **Install Argo CD**
-
-```bash
-kubectl create namespace argocd
-kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-```
-
-### Wait for pods:
-
-```bash
-kubectl get pods -n argocd
-```
-
-***
-
-# **Expose Argo CD (Port-Forward)**
-
-```bash
-kubectl port-forward -n argocd svc/argocd-server 8080:443
-```
-
-### Get ArgoCD admin password:
-
-```bash
-kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
-```
-
-Login UI:  
- <https://localhost:8080>
-
-***
-
-#  **Install Argo Rollouts**
-
-```bash
-kubectl create namespace argo-rollouts
-kubectl apply -n argo-rollouts \
-  -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
-```
-
-***
-
-#  **Install Argo Rollouts Kubectl Plugin (Recommended)**
-
-```bash
-brew install argoproj/tap/kubectl-argo-rollouts
-```
-
-***
-
-#  **Create a Sample Application (Rollout + Service)**
-
-Create folder:
-
-    rollouts-lab/
-      rollout.yaml
-      service.yaml
-      app.yaml (for ArgoCD)
-
-***
-
-#  **rollout.yaml**
+This starts with **v1**.  
+When you apply v2, Argo Rollouts will serve canary traffic **on a dedicated canary service**.
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 metadata:
-  name: canary-demo
-  namespace: default
+  name: demo-rollout
 spec:
   replicas: 4
-  strategy:
-    canary:
-      canaryService: canary-demo-canary
-      stableService: canary-demo-stable
-      steps:
-        - setWeight: 20
-        - pause: { duration: 30 }
-        - setWeight: 40
-        - pause: {}
   selector:
     matchLabels:
-      app: canary-demo
+      app: demo
   template:
     metadata:
       labels:
-        app: canary-demo
+        app: demo
     spec:
       containers:
-        - name: demo
-          image: nginx:1.20
-          ports:
-            - containerPort: 80
+      - name: demo
+        image: hashicorp/http-echo:0.2.3
+        args:
+        - "-text=Hello from v1"
+        - "-listen=:80"
+        ports:
+        - containerPort: 80
+
+  strategy:
+    canary:
+      canaryService: demo-canary
+      stableService: demo-stable
+      steps:
+      - setWeight: 20      # 20% traffic to v2
+      - pause: {}          # wait for manual check
+      - setWeight: 50      # 50% traffic to v2
+      - pause: {}          # wait again
 ```
 
-***
+# **Services**
 
-#  **service.yaml**
+### **Stable Service (v1 traffic)**
+
+`demo-stable.yaml`
 
 ```yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: canary-demo-stable
+  name: demo-stable
 spec:
   selector:
-    app: canary-demo
+    app: demo
   ports:
-    - port: 80
+  - port: 80
+    targetPort: 80
+```
 
----
+### **Canary Service (direct access to v2)**
+
+`demo-canary.yaml`
+
+```yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: canary-demo-canary
+  name: demo-canary
 spec:
   selector:
-    app: canary-demo
+    app: demo
   ports:
-    - port: 80
+  - port: 80
+    targetPort: 80
 ```
 
-***
 
-#  **Create ArgoCD Application**
+# Ingress for both Stable & Canary**
 
-Create: **app.yaml**
+`demo-ingress.yaml`
 
 ```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
+apiVersion: networking.k8s.io/v1
+kind: Ingress
 metadata:
-  name: canary-rollout-app
-  namespace: argocd
+  name: demo-ingress
 spec:
-  project: default
-  source:
-    repoURL: https://github.com/YOUR_GITHUB/rollouts-lab.git
-    targetRevision: HEAD
-    path: .
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: default
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-    syncOptions:
-      - CreateNamespace=true
+  rules:
+  - host: stable.demo.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: demo-stable
+            port:
+              number: 80
+
+  - host: canary.demo.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: demo-canary
+            port:
+              number: 80
 ```
 
-Apply it:
+
+# Deploy v1**
 
 ```bash
-kubectl apply -f app.yaml
+kubectl apply -f rollout-canary.yaml
+kubectl apply -f demo-stable.yaml
+kubectl apply -f demo-canary.yaml
+kubectl apply -f demo-ingress.yaml
 ```
 
-ArgoCD now auto-syncs your Rollout.
 
-***
-## Argo Login
+# Add Hosts Entries**
+
 ```bash
-argocd login 10.10.0.2:30081 \
-  --username admin \
-  --password <changeme> \
-  --insecure
+echo "10.10.0.2 stable.demo.local" | sudo tee -a /etc/hosts
+echo "10.10.0.2 canary.demo.local" | sudo tee -a /etc/hosts
 ```
 
-## Add repo
-```bash
-argocd repo add https://github.com/rootpromptnext/argo-rollout-canary.git   --username rootpromptnext   --password <changeme>   --insecure-skip-server-verification
 
-kubectl -n argocd get app canary-rollout-app -o yaml | grep repoURL
+# Test v1**
+
+Stable (v1 only):
+
+    curl http://stable.demo.local:30080
+    Hello from v1
+
+Canary (points to same pods until update):
+
+    curl http://canary.demo.local:30080
+    Hello from v1
+
+
+# Update to v2 (Start Canary)**
+
+Modify rollout:
+
+```yaml
+args:
+- "-text=Hello from v2"
 ```
 
-#  **Verify Rollout**
+Apply:
 
 ```bash
-kubectl argo rollouts get rollout canary-demo
+kubectl apply -f rollout-canary.yaml
 ```
 
-or use dashboard:
+Watch rollout:
 
 ```bash
-kubectl argo rollouts dashboard
+kubectl argo rollouts get rollout demo-rollout --watch
 ```
 
-Open:  
- <http://localhost:3100>
 
-***
+# Curl Stable vs Canary vs Weighted Traffic**
 
-# **Trigger a Canary Deployment (Update Image)**
+### **Stable = 100% v1**
 
-Edit image from:
-
-    nginx:1.20
-
-to:
-
-    nginx:1.21
-
-Commit → ArgoCD detects → Rollout starts canary.
-
-To push canges do argocd app sync
-```bash
-argocd app sync canary-rollout-app
-``
-
-***
-
-# **Observe Canary Steps**
-
-Check progress:
-
-```bash
-kubectl argo rollouts get rollout canary-demo --watch
-```
-
-You will see:
-
-*   Set weight: 20%
-*   Pause 30 sec
-*   Set weight: 40%
-*   Pause (await manual approval)
+    curl http://stable.demo.local:30080
+    Hello from v1
 
 ***
 
-# **Promote Canary**
+### **Canary (direct) = 100% v2**
+
+    curl http://canary.demo.local:30080
+    Hello from v2
+
+
+### **During rollout – weighted traffic test**
+
+Argo Rollouts does split on *stable service*, so test this:
+
+    curl http://stable.demo.local:30080
+
+You will see mixture:
+
+*   At 20% weight → mostly v1, sometimes v2
+*   At 50% weight → 50/50 ratio
+
+
+
+# **Promote v2**
 
 ```bash
-kubectl argo rollouts promote canary-demo
+kubectl argo rollouts promote demo-rollout
 ```
 
-This moves from 40% → 100% → Stable.
+Now:
 
-***
+    curl http://stable.demo.local:30080
+    Hello from v2
 
-# **Abort Canary **
+Canary also becomes v2:
+
+    curl http://canary.demo.local:30080
+    Hello from v2
+
+
+
+# **Rollback to v1**
 
 ```bash
-kubectl argo rollouts abort canary-demo
+kubectl argo rollouts undo demo-rollout
 ```
 
-Automatically rolls back to last stable version.
+    curl http://stable.demo.local:30080
+    Hello from v1
+
 
