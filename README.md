@@ -188,6 +188,20 @@ kubectl apply -f app.yaml
 ArgoCD now auto-syncs your Rollout.
 
 ***
+## Argo Login
+```bash
+argocd login 10.10.0.2:30081 \
+  --username admin \
+  --password <changeme> \
+  --insecure
+```
+
+## Add repo
+```bash
+argocd repo add https://github.com/rootpromptnext/argo-rollout-canary.git   --username rootpromptnext   --password <changeme>   --insecure-skip-server-verification
+
+kubectl -n argocd get app canary-rollout-app -o yaml | grep repoURL
+```
 
 #  **Verify Rollout**
 
@@ -217,6 +231,11 @@ to:
     nginx:1.21
 
 Commit → ArgoCD detects → Rollout starts canary.
+
+To push canges do argocd app sync
+```bash
+argocd app sync canary-rollout-app
+``
 
 ***
 
@@ -255,6 +274,3 @@ kubectl argo rollouts abort canary-demo
 
 Automatically rolls back to last stable version.
 
-
-
-# Want me to package this lab into a **PDF**, **GitHub-ready repository**, or **step-by-step guide with diagrams**?
